@@ -4,5 +4,5 @@ numpy
 soundfile
 pandas
 scipy
-azure-core
 matplotlib
+azure-cognitiveservices-speech
