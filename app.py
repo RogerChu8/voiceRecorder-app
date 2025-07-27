@@ -7,6 +7,11 @@ import zipfile
 import os
 import pandas as pd
 import streamlit.components.v1 as components
+import numpy as np
+from scipy.io import wavfile
+import azure.cognitiveservices.speech as speechsdk
+import tempfile
+import matplotlib.pyplot as plt
 
 # Custom CSS for layout and colors
 st.markdown("""
@@ -53,12 +58,106 @@ st.markdown("""
 # App title
 st.title("Voice Script Recorder")
 
+# Sidebar for Azure credentials (optional for pronunciation assessment)
+with st.sidebar:
+    st.subheader("Azure Speech Settings (Optional)")
+    speech_key = st.text_input("Azure Speech Subscription Key", type="password")
+
+SPEECH_REGION = "southeastasia"
+
+
+# Function to compute audio quality metrics
+def compute_audio_metrics(audio_bytes, script_text="", speech_key=None, service_region=None):
+    metrics = {}
+    bio = io.BytesIO(audio_bytes)
+    rate, data = wavfile.read(bio)
+    if data.ndim > 1:
+        data = data[:, 0]  # Ensure mono
+    data_norm = data.astype(np.float32) / np.iinfo(data.dtype).max  # Normalize to -1 to 1
+
+    # Peak and RMS volume levels
+    peak_db = 20 * np.log10(np.max(np.abs(data_norm))) if np.max(np.abs(data_norm)) > 0 else -np.inf
+    rms_db = 20 * np.log10(np.sqrt(np.mean(data_norm ** 2))) if np.mean(data_norm ** 2) > 0 else -np.inf
+    metrics['peak_db'] = peak_db
+    metrics['rms_db'] = rms_db
+
+    # SNR estimation (rough: min RMS window as noise)
+    window_size = int(0.1 * rate)  # 0.1s windows
+    if window_size > 0:
+        rms_windows = [np.sqrt(np.mean(data_norm[start:start + window_size] ** 2)) for start in
+                       range(0, len(data_norm), window_size)]
+        noise_rms = min(rms_windows) if rms_windows else 0
+        signal_rms = np.sqrt(np.mean(data_norm ** 2))
+        snr_db = 20 * np.log10(signal_rms / noise_rms) if noise_rms > 0 else np.inf
+        metrics['snr_db'] = snr_db
+    else:
+        metrics['snr_db'] = np.nan
+
+    # General quality: Check for clipping (distortions)
+    metrics['clipping'] = np.any(np.abs(data_norm) >= 1.0)
+
+    # Pronunciation score (using Azure if credentials provided)
+    metrics['pronunciation_score'] = None
+    if speech_key and service_region and script_text:
+        try:
+            # Save temp file for Azure
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_file.write(audio_bytes)
+                temp_filename = temp_file.name
+
+            speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=service_region)
+            audio_config = speechsdk.AudioConfig(filename=temp_filename)
+            speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, language="en-SG",
+                                                           audio_config=audio_config)
+
+            pronunciation_config = speechsdk.PronunciationAssessmentConfig(
+                reference_text=script_text,
+                grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
+                granularity=speechsdk.PronunciationAssessmentGranularity.Phoneme,
+                enable_miscue=False
+            )
+            pronunciation_config.enable_prosody_assessment()
+            pronunciation_config.apply_to(speech_recognizer)
+
+            result = speech_recognizer.recognize_once()
+            pronunciation_result = speechsdk.PronunciationAssessmentResult(result)
+            metrics['pronunciation_score'] = pronunciation_result.accuracy_score  # Sentence-level accuracy (0-100)
+            metrics['fluency_score'] = pronunciation_result.fluency_score
+            metrics['prosody_score'] = pronunciation_result.prosody_score
+
+            os.unlink(temp_filename)
+        except Exception as e:
+            metrics['pronunciation_error'] = str(e)
+
+    return metrics, rate, data
+
+
+# Function to create HTML gauge
+def html_gauge(label, value, unit, min_val, max_val, sections):
+    if np.isnan(value) or np.isinf(value):
+        value = min_val
+    value = np.clip(value, min_val, max_val)
+    html = f"<p>{label}: {value:.2f}{unit}</p>"
+    html += "<div style='position:relative; width:100%; height:20px; background:#e0e0e0; border:1px solid #ccc;'>"
+    for start, end, color in sections:
+        left = (max(start, min_val) - min_val) / (max_val - min_val) * 100
+        width = (min(end, max_val) - max(start, min_val)) / (max_val - min_val) * 100
+        html += f"<div style='position:absolute; left:{left}%; width:{width}%; height:100%; background-color:{color};'></div>"
+    pointer = (value - min_val) / (max_val - min_val) * 100
+    html += f"<div style='position:absolute; left:{pointer}%; width:2px; height:100%; background:black;'></div>"
+    html += "</div>"
+    html += f"<div style='display:flex; justify-content:space-between; font-size:12px;'><span>{min_val}</span><span>{max_val}</span></div>"
+    return html
+
+
 # Accept and remove functions
 def accept(s):
     if st.session_state.temp_audio:
         s['status'] = 'Completed'
         s['record_time'] = st.session_state.record_time
-        date = datetime.date.today().strftime('%Y%m%d') if st.session_state.audio_updated else s.get('latest_date', datetime.date.today().strftime('%Y%m%d'))
+        date = datetime.date.today().strftime('%Y%m%d') if st.session_state.audio_updated else s.get('latest_date',
+                                                                                                     datetime.date.today().strftime(
+                                                                                                         '%Y%m%d'))
         s['latest_date'] = date
         num = f"{s['num']:04d}"
         base_name = f"script{num}_{date}"
@@ -88,6 +187,7 @@ def accept(s):
         st.session_state.scroll_to_selected = True
         st.rerun()
 
+
 def remove(s):
     s['status'] = 'Removed'
     s['record_time'] = 0.0
@@ -112,6 +212,7 @@ def remove(s):
     st.session_state.table_key = f"scripts_table_{datetime.datetime.now().isoformat()}"
     st.session_state.scroll_to_selected = True
     st.rerun()
+
 
 # Function to update statuses based on uploaded files and removed
 def update_statuses_and_texts(uploaded_files):
@@ -178,13 +279,15 @@ def update_statuses_and_texts(uploaded_files):
         if s['status'] == 'Completed' and 'latest_date' in s:
             keep_txt = f"script{num_str}_{s['latest_date']}.txt"
             keep_wav = f"script{num_str}_{s['latest_date']}.wav"
-            keys_to_delete = [k for k in st.session_state.files if k.startswith(f"script{num_str}_") and k not in [keep_txt, keep_wav]]
+            keys_to_delete = [k for k in st.session_state.files if
+                              k.startswith(f"script{num_str}_") and k not in [keep_txt, keep_wav]]
             for k in keys_to_delete:
                 del st.session_state.files[k]
         else:
             keys_to_delete = [k for k in st.session_state.files if k.startswith(f"script{num_str}_")]
             for k in keys_to_delete:
                 del st.session_state.files[k]
+
 
 # Session state
 if 'scripts' not in st.session_state:
@@ -219,7 +322,7 @@ if 'previous_current_index' not in st.session_state:
     st.session_state.previous_current_index = -1
 
 # Top row: Mic (skip), Load buttons
-col_mic, col_load_new, col_continue = st.columns([2,1,1])
+col_mic, col_load_new, col_continue = st.columns([2, 1, 1])
 with col_mic:
     st.write("Select Microphone: Browser Default")
 with col_load_new:
@@ -231,7 +334,7 @@ with col_continue:
 
 # Load logic
 if 'load_mode' in st.session_state:
-    if st.session_state.load_mode =="new":
+    if st.session_state.load_mode == "new":
         scripts_uploader = st.file_uploader("Select scripts.txt File to Upload", type="txt", key="new_scripts")
         if scripts_uploader:
             lines = scripts_uploader.read().decode().splitlines()
@@ -242,7 +345,8 @@ if 'load_mode' in st.session_state:
                     num_str, text = line.split('.', 1)
                     num = int(num_str)
                     text = text.strip()
-                    st.session_state.scripts.append({'num': num, 'text': text, 'status': 'Not started', 'record_time': 0.0, 'selected': False})
+                    st.session_state.scripts.append(
+                        {'num': num, 'text': text, 'status': 'Not started', 'record_time': 0.0, 'selected': False})
             st.session_state.removed_nums = []
             st.session_state.output_dir = "New Project"
             if st.session_state.scripts:
@@ -250,9 +354,11 @@ if 'load_mode' in st.session_state:
                 st.session_state.current_index = 0
             del st.session_state.load_mode
             st.rerun()
-    elif st.session_state.load_mode =="existing":
-        st.info("Upload all files from your existing project directory (including scripts.txt, removed.txt or scripts.removed, and all .txt/.wav files). The app will verify scripts.txt is included.")
-        existing_files = st.file_uploader("Upload all files from the directory", type=["txt", "wav"], accept_multiple_files=True, key="exist_files")
+    elif st.session_state.load_mode == "existing":
+        st.info(
+            "Upload all files from your existing project directory (including scripts.txt, removed.txt or scripts.removed, and all .txt/.wav files). The app will verify scripts.txt is included.")
+        existing_files = st.file_uploader("Upload all files from the directory", type=["txt", "wav"],
+                                          accept_multiple_files=True, key="exist_files")
         has_scripts = any(f.name == "scripts.txt" for f in existing_files)
         if existing_files:
             if not has_scripts:
@@ -267,14 +373,17 @@ if 'load_mode' in st.session_state:
                         num_str, text = line.split('.', 1)
                         num = int(num_str)
                         text = text.strip()
-                        st.session_state.scripts.append({'num': num, 'text': text, 'status': 'Not started', 'record_time': 0.0, 'selected': False})
+                        st.session_state.scripts.append(
+                            {'num': num, 'text': text, 'status': 'Not started', 'record_time': 0.0, 'selected': False})
                 removed_file = next((f for f in existing_files if f.name in ["scripts.removed", "removed.txt"]), None)
                 if removed_file:
                     removed_lines = removed_file.read().decode().splitlines()
-                    st.session_state.removed_nums = [int(line.strip()) for line in removed_lines if line.strip().isdigit()]
+                    st.session_state.removed_nums = [int(line.strip()) for line in removed_lines if
+                                                     line.strip().isdigit()]
                 else:
                     st.session_state.removed_nums = []
-                other_files = [f for f in existing_files if f.name not in ["scripts.txt", "scripts.removed", "removed.txt"]]
+                other_files = [f for f in existing_files if
+                               f.name not in ["scripts.txt", "scripts.removed", "removed.txt"]]
                 update_statuses_and_texts(other_files)
                 st.session_state.output_dir = "Uploaded Project"
                 if st.session_state.scripts:
@@ -284,7 +393,7 @@ if 'load_mode' in st.session_state:
                 st.rerun()
 
 # Subdir label, Add, Update
-col_subdir, col_add, col_update = st.columns([2,1,1])
+col_subdir, col_add, col_update = st.columns([2, 1, 1])
 with col_subdir:
     st.write(f"Output Subdirectory: {st.session_state.output_dir}")
 with col_add:
@@ -292,7 +401,8 @@ with col_add:
         st.session_state.add_process = 'download'
     if st.session_state.add_process == 'download':
         scripts_content = "\n".join(f"{s['num']}. {s['text']}" for s in st.session_state.scripts)
-        st.download_button("Download updated scripts.txt", scripts_content.encode(), file_name="scripts.txt", key="add_download")
+        st.download_button("Download updated scripts.txt", scripts_content.encode(), file_name="scripts.txt",
+                           key="add_download")
         if st.button("Proceed to upload additional scripts"):
             st.session_state.add_process = 'upload'
     if st.session_state.add_process == 'upload':
@@ -312,13 +422,15 @@ with col_add:
                 max_num = max(s['num'] for s in st.session_state.scripts) if st.session_state.scripts else 0
                 for text in new_entries:
                     max_num += 1
-                    st.session_state.scripts.append({'num': max_num, 'text': text, 'status': 'Not started', 'record_time': 0.0, 'selected': False})
+                    st.session_state.scripts.append(
+                        {'num': max_num, 'text': text, 'status': 'Not started', 'record_time': 0.0, 'selected': False})
             st.session_state.add_process = None
             st.rerun()
 with col_update:
     if st.button("Update Scripts"):
         scripts_content = "\n".join(f"{s['num']}. {s['text']}" for s in st.session_state.scripts)
-        st.download_button("Download updated scripts.txt", scripts_content.encode(), file_name="scripts.txt", key="update_download")
+        st.download_button("Download updated scripts.txt", scripts_content.encode(), file_name="scripts.txt",
+                           key="update_download")
 
 # Scripts list
 if st.session_state.scripts:
@@ -327,6 +439,7 @@ if st.session_state.scripts:
     for s in st.session_state.scripts:
         if 'selected' not in s:
             s['selected'] = False
+
 
     def style_rows(row):
         if row['Select']:
@@ -338,7 +451,9 @@ if st.session_state.scripts:
         else:
             return [''] * len(row)
 
-    data = [{'Select': s['selected'], 'Num': s['num'], 'Status': s['status'], 'Preview': s['text'][:50] + ('...' if len(s['text']) > 50 else '')} for s in st.session_state.scripts]
+
+    data = [{'Select': s['selected'], 'Num': s['num'], 'Status': s['status'],
+             'Preview': s['text'][:50] + ('...' if len(s['text']) > 50 else '')} for s in st.session_state.scripts]
     df = pd.DataFrame(data)
     styled_df = df.style.apply(style_rows, axis=1)
     column_config = {
@@ -347,7 +462,8 @@ if st.session_state.scripts:
         'Status': st.column_config.TextColumn(),
         'Preview': st.column_config.TextColumn(),
     }
-    edited_df = st.data_editor(styled_df, column_config=column_config, disabled=["Num", "Status", "Preview"], hide_index=True, num_rows="fixed", key=st.session_state.table_key)
+    edited_df = st.data_editor(styled_df, column_config=column_config, disabled=["Num", "Status", "Preview"],
+                               hide_index=True, num_rows="fixed", key=st.session_state.table_key)
 
     changed = False
     newly_selected = []
@@ -398,7 +514,7 @@ if st.session_state.scripts:
             function scrollToRow() {{
                 const doc = window.document;
                 const row = doc.querySelector('.ag-row[row-index="{st.session_state.current_index}"]');
-                if (row) {{
+                if (row){{
                     row.scrollIntoView({{behavior: 'smooth', block: 'center'}});
                     return true;
                 }}
@@ -446,7 +562,8 @@ if s:
         st.write(f"Status: {s['status']}")
     with col_prev:
         if st.button("Prev"):
-            new_index = st.session_state.current_index - 1 if st.session_state.current_index > 0 else len(st.session_state.scripts) - 1
+            new_index = st.session_state.current_index - 1 if st.session_state.current_index > 0 else len(
+                st.session_state.scripts) - 1
             for script in st.session_state.scripts:
                 script['selected'] = False
             st.session_state.scripts[new_index]['selected'] = True
@@ -479,17 +596,13 @@ st.write(f"Record time: {st.session_state.record_time:.1f} seconds")
 
 # Buttons row
 col_record, col_play, col_accept, col_remove = st.columns(4)
+audio_bytes = None
 with col_record:
     st.markdown('<div class="record-button">', unsafe_allow_html=True)
-    audio_bytes = audio_recorder(text="", recording_color="#FF0000", neutral_color="#00FF00", key=f"recorder_{st.session_state.current_index}")
+    audio_bytes = audio_recorder(text="", recording_color="#FF0000", neutral_color="#00FF00",
+                                 key=f"recorder_{st.session_state.current_index}")
     st.markdown('</div>', unsafe_allow_html=True)
-    if audio_bytes and s:
-        st.session_state.temp_audio = audio_bytes
-        st.session_state.audio_updated = True
-        with wave.open(io.BytesIO(audio_bytes), 'rb') as w:
-            frames = w.getnframes()
-            rate = w.getframerate()
-            st.session_state.record_time = frames / rate if rate else 0.0
+
 with col_play:
     st.markdown('<div class="play-button">', unsafe_allow_html=True)
     if st.button("►", disabled=s is None):
@@ -502,6 +615,61 @@ with col_accept:
 with col_remove:
     if st.button("Remove", disabled=s is None):
         remove(s)
+
+if audio_bytes and s:
+    st.session_state.temp_audio = audio_bytes
+    st.session_state.audio_updated = True
+    with wave.open(io.BytesIO(audio_bytes), 'rb') as w:
+        frames = w.getnframes()
+        rate = w.getframerate()
+        st.session_state.record_time = frames / rate if rate else 0.0
+
+    # Compute and display metrics
+    metrics, rate, waveform = compute_audio_metrics(st.session_state.temp_audio, script_text=s['text'],
+                                                    speech_key=speech_key if speech_key else None,
+                                                    service_region=SPEECH_REGION)
+
+    st.subheader("Audio Quality Metrics")
+
+    # First row: Peak Volume, Overall Volume, SNR, Pronunciation
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        html = html_gauge("Peak Vol", metrics.get('peak_db', -np.inf), "db", -24, 0,
+                          [(-24, -12, 'red'), (-12, -6, 'orange'), (-6, -3, 'green'), (-3, 0, 'red')])
+        st.markdown(html, unsafe_allow_html=True)
+    with col2:
+        html = html_gauge("Overall Vol", metrics.get('rms_db', -np.inf), "db", -40, 0,
+                          [(-40, -30, 'red'), (-30, -18, 'orange'), (-18, 0, 'green')])
+        st.markdown(html, unsafe_allow_html=True)
+    with col3:
+        html = html_gauge("SNR", metrics.get('snr_db', np.nan), "db", 0, 60,
+                          [(0, 20, 'red'), (20, 35, 'orange'), (35, 60, 'green')])
+        st.markdown(html, unsafe_allow_html=True)
+    with col4:
+        html = html_gauge("Pronunciation", metrics.get('pronunciation_score', np.nan), "", 0, 100,
+                          [(0, 50, 'red'), (50, 70, 'orange'), (70, 100, 'green')])
+        st.markdown(html, unsafe_allow_html=True)
+
+    # Second row: Fluency, Prosody, Waveform (spanning two columns)
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        html = html_gauge("Fluency", metrics.get('fluency_score', np.nan), "", 0, 100,
+                          [(0, 50, 'red'), (50, 70, 'orange'), (70, 100, 'green')])
+        st.markdown(html, unsafe_allow_html=True)
+    with col2:
+        html = html_gauge("Prosody", metrics.get('prosody_score', np.nan), "", 0, 100,
+                          [(0, 50, 'red'), (50, 70, 'orange'), (70, 100, 'green')])
+        st.markdown(html, unsafe_allow_html=True)
+    with col3:
+        fig, ax = plt.subplots(figsize=(4, 1))
+        ax.plot(np.linspace(0, len(waveform) / rate, num=len(waveform)), waveform)
+        ax.axis('off')
+        st.pyplot(fig)
+
+    if metrics.get('clipping'):
+        st.warning("Clipping detected (possible distortions)")
+    if 'pronunciation_error' in metrics:
+        st.warning(f"Pronunciation assessment error: {metrics['pronunciation_error']}")
 
 # Download Project button at the bottom
 if st.session_state.scripts:

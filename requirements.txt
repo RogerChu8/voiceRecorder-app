@@ -3,3 +3,6 @@ audio-recorder-streamlit
 numpy
 soundfile
 pandas
+scipy
+azure-core
+matplotlib
