@@ -6,6 +6,7 @@ import io
 import zipfile
 import os
 import pandas as pd
+import streamlit.components.v1 as components
 
 # Custom CSS for layout and colors
 st.markdown("""
@@ -44,7 +45,7 @@ st.markdown("""
         background-color: #f2f2f2;
     }
     .stApp h1 {
-        font-size: 180%;
+        font-size: 240%;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -57,9 +58,10 @@ def accept(s):
     if st.session_state.temp_audio:
         s['status'] = 'Completed'
         s['record_time'] = st.session_state.record_time
-        today = datetime.date.today().strftime('%Y%m%d')
+        date = datetime.date.today().strftime('%Y%m%d') if st.session_state.audio_updated else s.get('latest_date', datetime.date.today().strftime('%Y%m%d'))
+        s['latest_date'] = date
         num = f"{s['num']:04d}"
-        base_name = f"script{num}_{today}"
+        base_name = f"script{num}_{date}"
         # Delete all existing files for this num
         keys_to_delete = [k for k in st.session_state.files if k.startswith(f"script{num}_")]
         for k in keys_to_delete:
@@ -72,10 +74,18 @@ def accept(s):
         st.download_button("Download .wav", st.session_state.temp_audio, file_name=base_name + '.wav', key="wav_down")
         if s['num'] in st.session_state.removed_nums:
             st.session_state.removed_nums.remove(s['num'])
-        s['latest_date'] = today
         st.session_state.temp_audio = None
-        if st.session_state.current_index + 1 < len(st.session_state.scripts):
-            st.session_state.current_index += 1
+        st.session_state.audio_updated = False
+        next_index = st.session_state.current_index + 1
+        if next_index >= len(st.session_state.scripts):
+            next_index = 0
+        for script in st.session_state.scripts:
+            script['selected'] = False
+        if next_index >= 0:
+            st.session_state.scripts[next_index]['selected'] = True
+        st.session_state.current_index = next_index
+        st.session_state.table_key = f"scripts_table_{datetime.datetime.now().isoformat()}"
+        st.session_state.scroll_to_selected = True
         st.rerun()
 
 def remove(s):
@@ -91,6 +101,16 @@ def remove(s):
         del st.session_state.files[k]
     if 'latest_date' in s:
         del s['latest_date']
+    next_index = st.session_state.current_index + 1
+    if next_index >= len(st.session_state.scripts):
+        next_index = 0
+    for script in st.session_state.scripts:
+        script['selected'] = False
+    if next_index >= 0:
+        st.session_state.scripts[next_index]['selected'] = True
+    st.session_state.current_index = next_index
+    st.session_state.table_key = f"scripts_table_{datetime.datetime.now().isoformat()}"
+    st.session_state.scroll_to_selected = True
     st.rerun()
 
 # Function to update statuses based on uploaded files and removed
@@ -183,6 +203,20 @@ if 'files' not in st.session_state:
     st.session_state.files = {}
 if 'last_selected' not in st.session_state:
     st.session_state.last_selected = -1
+if 'audio_updated' not in st.session_state:
+    st.session_state.audio_updated = False
+if 'add_process' not in st.session_state:
+    st.session_state.add_process = None
+if 'load_mode' not in st.session_state:
+    st.session_state.load_mode = None
+if 'table_key' not in st.session_state:
+    st.session_state.table_key = "scripts_table"
+if 'scroll_to_top' not in st.session_state:
+    st.session_state.scroll_to_top = False
+if 'scroll_to_selected' not in st.session_state:
+    st.session_state.scroll_to_selected = False
+if 'previous_current_index' not in st.session_state:
+    st.session_state.previous_current_index = -1
 
 # Top row: Mic (skip), Load buttons
 col_mic, col_load_new, col_continue = st.columns([2,1,1])
@@ -208,10 +242,11 @@ if 'load_mode' in st.session_state:
                     num_str, text = line.split('.', 1)
                     num = int(num_str)
                     text = text.strip()
-                    st.session_state.scripts.append({'num': num, 'text': text, 'status': 'Not started', 'record_time': 0.0})
+                    st.session_state.scripts.append({'num': num, 'text': text, 'status': 'Not started', 'record_time': 0.0, 'selected': False})
             st.session_state.removed_nums = []
             st.session_state.output_dir = "New Project"
             if st.session_state.scripts:
+                st.session_state.scripts[0]['selected'] = True
                 st.session_state.current_index = 0
             del st.session_state.load_mode
             st.rerun()
@@ -232,7 +267,7 @@ if 'load_mode' in st.session_state:
                         num_str, text = line.split('.', 1)
                         num = int(num_str)
                         text = text.strip()
-                        st.session_state.scripts.append({'num': num, 'text': text, 'status': 'Not started', 'record_time': 0.0})
+                        st.session_state.scripts.append({'num': num, 'text': text, 'status': 'Not started', 'record_time': 0.0, 'selected': False})
                 removed_file = next((f for f in existing_files if f.name in ["scripts.removed", "removed.txt"]), None)
                 if removed_file:
                     removed_lines = removed_file.read().decode().splitlines()
@@ -243,6 +278,7 @@ if 'load_mode' in st.session_state:
                 update_statuses_and_texts(other_files)
                 st.session_state.output_dir = "Uploaded Project"
                 if st.session_state.scripts:
+                    st.session_state.scripts[0]['selected'] = True
                     st.session_state.current_index = 0
                 del st.session_state.load_mode
                 st.rerun()
@@ -253,6 +289,13 @@ with col_subdir:
     st.write(f"Output Subdirectory: {st.session_state.output_dir}")
 with col_add:
     if st.button("Add Scripts"):
+        st.session_state.add_process = 'download'
+    if st.session_state.add_process == 'download':
+        scripts_content = "\n".join(f"{s['num']}. {s['text']}" for s in st.session_state.scripts)
+        st.download_button("Download updated scripts.txt", scripts_content.encode(), file_name="scripts.txt", key="add_download")
+        if st.button("Proceed to upload additional scripts"):
+            st.session_state.add_process = 'upload'
+    if st.session_state.add_process == 'upload':
         add_uploader = st.file_uploader("Select Additional Scripts File", type="txt", key="add_scripts")
         if add_uploader:
             lines = add_uploader.read().decode().splitlines()
@@ -264,13 +307,14 @@ with col_add:
                     text = text.strip()
                     new_texts.append(text)
             existing_texts = set(s['text'].strip() for s in st.session_state.scripts)
-            new_entries = [text for text in new_texts if text.strip() not in existing_texts]
+            new_entries = [text for text in new_texts if text not in existing_texts]
             if new_entries:
                 max_num = max(s['num'] for s in st.session_state.scripts) if st.session_state.scripts else 0
                 for text in new_entries:
                     max_num += 1
-                    st.session_state.scripts.append({'num': max_num, 'text': text, 'status': 'Not started', 'record_time': 0.0})
-                st.rerun()
+                    st.session_state.scripts.append({'num': max_num, 'text': text, 'status': 'Not started', 'record_time': 0.0, 'selected': False})
+            st.session_state.add_process = None
+            st.rerun()
 with col_update:
     if st.button("Update Scripts"):
         scripts_content = "\n".join(f"{s['num']}. {s['text']}" for s in st.session_state.scripts)
@@ -280,23 +324,98 @@ with col_update:
 if st.session_state.scripts:
     st.subheader("Scripts")
 
+    for s in st.session_state.scripts:
+        if 'selected' not in s:
+            s['selected'] = False
+
     def style_rows(row):
-        if row['Status'] == 'Completed':
+        if row['Select']:
+            return ['background-color: #FFCCCC'] * len(row)
+        elif row['Status'] == 'Completed':
             return ['background-color: lightgreen'] * len(row)
         elif row['Status'] == 'Removed':
             return ['background-color: lightgrey'] * len(row)
         else:
             return [''] * len(row)
 
-    data = [{'Num': s['num'], 'Status': s['status'], 'Preview': s['text'][:50] + ('...' if len(s['text']) > 50 else '')} for s in st.session_state.scripts]
+    data = [{'Select': s['selected'], 'Num': s['num'], 'Status': s['status'], 'Preview': s['text'][:50] + ('...' if len(s['text']) > 50 else '')} for s in st.session_state.scripts]
     df = pd.DataFrame(data)
     styled_df = df.style.apply(style_rows, axis=1)
-    grid_return = st.dataframe(styled_df, use_container_width=True, hide_index=True, selection_mode='single-row', height=300, on_select="rerun", key="scripts_table")
-    selected_rows = grid_return.selection.rows
-    if selected_rows:
-        st.session_state.current_index = selected_rows[0]
-    else:
-        st.session_state.current_index = -1
+    column_config = {
+        'Select': st.column_config.CheckboxColumn('Select', width="small", default=False),
+        'Num': st.column_config.NumberColumn(),
+        'Status': st.column_config.TextColumn(),
+        'Preview': st.column_config.TextColumn(),
+    }
+    edited_df = st.data_editor(styled_df, column_config=column_config, disabled=["Num", "Status", "Preview"], hide_index=True, num_rows="fixed", key=st.session_state.table_key)
+
+    changed = False
+    newly_selected = []
+    for i in range(len(st.session_state.scripts)):
+        new_select = edited_df['Select'][i]
+        if new_select != st.session_state.scripts[i]['selected']:
+            if new_select:
+                newly_selected.append(i)
+            st.session_state.scripts[i]['selected'] = new_select
+            changed = True
+    if len(newly_selected) > 0:
+        new_i = newly_selected[-1]
+        for j in range(len(st.session_state.scripts)):
+            if j != new_i:
+                if st.session_state.scripts[j]['selected']:
+                    st.session_state.scripts[j]['selected'] = False
+                    changed = True
+
+    checked_indices = [i for i in range(len(st.session_state.scripts)) if st.session_state.scripts[i]['selected']]
+    st.session_state.current_index = checked_indices[0] if checked_indices else -1
+
+    if st.session_state.current_index != st.session_state.previous_current_index:
+        st.session_state.scroll_to_selected = True
+        st.session_state.previous_current_index = st.session_state.current_index
+
+    if changed:
+        st.rerun()
+
+    if st.session_state.scroll_to_top:
+        components.html(
+            """
+            <script>
+                const doc = window.document;
+                const viewport = doc.querySelector('.ag-body-viewport');
+                if (viewport) {
+                    viewport.scrollTop = 0;
+                }
+            </script>
+            """,
+            height=0,
+        )
+        st.session_state.scroll_to_top = False
+
+    if st.session_state.scroll_to_selected and st.session_state.current_index >= 0:
+        components.html(
+            f"""
+            <script>
+            function scrollToRow() {{
+                const doc = window.document;
+                const row = doc.querySelector('.ag-row[row-index="{st.session_state.current_index}"]');
+                if (row) {{
+                    row.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+                    return true;
+                }}
+                return false;
+            }}
+            let attempts = 0;
+            const interval = setInterval(() => {{
+                attempts++;
+                if (scrollToRow() || attempts > 50) {{
+                    clearInterval(interval);
+                }}
+            }}, 100);
+            </script>
+            """,
+            height=0,
+        )
+        st.session_state.scroll_to_selected = False
 
 # Edit script
 s = st.session_state.scripts[st.session_state.current_index] if st.session_state.current_index >= 0 else None
@@ -315,12 +434,40 @@ if s:
             wav_filename = f"script{s['num']:04d}_{s['latest_date']}.wav"
             st.session_state.temp_audio = st.session_state.files.get(wav_filename)
             st.session_state.record_time = s['record_time']
+            st.session_state.audio_updated = False
         else:
             st.session_state.temp_audio = None
             st.session_state.record_time = 0.0
+            st.session_state.audio_updated = False
+    col_num, col_status, col_prev, col_next = st.columns([2, 2, 1, 1])
+    with col_num:
+        st.write(f"Script Num: {s['num']}")
+    with col_status:
+        st.write(f"Status: {s['status']}")
+    with col_prev:
+        if st.button("Prev"):
+            new_index = st.session_state.current_index - 1 if st.session_state.current_index > 0 else len(st.session_state.scripts) - 1
+            for script in st.session_state.scripts:
+                script['selected'] = False
+            st.session_state.scripts[new_index]['selected'] = True
+            st.session_state.current_index = new_index
+            st.session_state.scroll_to_selected = True
+            st.session_state.table_key = f"scripts_table_{datetime.datetime.now().isoformat()}"
+            st.rerun()
+    with col_next:
+        if st.button("Next"):
+            new_index = (st.session_state.current_index + 1) % len(st.session_state.scripts)
+            for script in st.session_state.scripts:
+                script['selected'] = False
+            st.session_state.scripts[new_index]['selected'] = True
+            st.session_state.current_index = new_index
+            st.session_state.scroll_to_selected = True
+            st.session_state.table_key = f"scripts_table_{datetime.datetime.now().isoformat()}"
+            st.rerun()
 else:
     st.session_state.temp_audio = None
     st.session_state.record_time = 0.0
+    st.session_state.audio_updated = False
 st.write("Edit Script:")
 edit_key = f"edit_text_{st.session_state.current_index}" if st.session_state.current_index >= 0 else "edit_text_none"
 edited_text = st.text_area("", value=s['text'] if s else "", height=150, key=edit_key, disabled=s is None)
@@ -338,6 +485,7 @@ with col_record:
     st.markdown('</div>', unsafe_allow_html=True)
     if audio_bytes and s:
         st.session_state.temp_audio = audio_bytes
+        st.session_state.audio_updated = True
         with wave.open(io.BytesIO(audio_bytes), 'rb') as w:
             frames = w.getnframes()
             rate = w.getframerate()
