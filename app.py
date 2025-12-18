@@ -98,6 +98,8 @@ def compute_audio_metrics(audio_bytes, script_text="", speech_key=None, service_
 
     # Pronunciation score (using Azure if credentials provided)
     metrics['pronunciation_score'] = None
+    metrics['fluency_score'] = None
+    metrics['prosody_score'] = None
     if speech_key and service_region and script_text:
         try:
             # Save temp file for Azure
@@ -134,6 +136,12 @@ def compute_audio_metrics(audio_bytes, script_text="", speech_key=None, service_
 
 # Function to create HTML gauge
 def html_gauge(label, value, unit, min_val, max_val, sections):
+    if value is None:
+        return f"<p>{label}: N/A</p>"
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return f"<p>{label}: N/A</p>"
     if np.isnan(value) or np.isinf(value):
         value = min_val
     value = np.clip(value, min_val, max_val)
@@ -169,8 +177,6 @@ def accept(s):
         txt_bytes = s['text'].encode()
         st.session_state.files[base_name + '.txt'] = txt_bytes
         st.session_state.files[base_name + '.wav'] = st.session_state.temp_audio
-        st.download_button("Download .txt", txt_bytes, file_name=base_name + '.txt', key="txt_down")
-        st.download_button("Download .wav", st.session_state.temp_audio, file_name=base_name + '.wav', key="wav_down")
         if s['num'] in st.session_state.removed_nums:
             st.session_state.removed_nums.remove(s['num'])
         st.session_state.temp_audio = None
@@ -514,7 +520,7 @@ if st.session_state.scripts:
             function scrollToRow() {{
                 const doc = window.document;
                 const row = doc.querySelector('.ag-row[row-index="{st.session_state.current_index}"]');
-                if (row){{
+                if (row) {{
                     row.scrollIntoView({{behavior: 'smooth', block: 'center'}});
                     return true;
                 }}
@@ -587,7 +593,8 @@ else:
     st.session_state.audio_updated = False
 st.write("Edit Script:")
 edit_key = f"edit_text_{st.session_state.current_index}" if st.session_state.current_index >= 0 else "edit_text_none"
-edited_text = st.text_area("", value=s['text'] if s else "", height=150, key=edit_key, disabled=s is None)
+edited_text = st.text_area("Edit Script:", value=s['text'] if s else "", height=150, key=edit_key, disabled=s is None,
+                           label_visibility="collapsed")
 if s and edited_text != s['text']:
     s['text'] = edited_text
 
@@ -646,18 +653,18 @@ if audio_bytes and s:
                           [(0, 20, 'red'), (20, 35, 'orange'), (35, 60, 'green')])
         st.markdown(html, unsafe_allow_html=True)
     with col4:
-        html = html_gauge("Pronunciation", metrics.get('pronunciation_score', np.nan), "", 0, 100,
+        html = html_gauge("Pronunciation", metrics.get('pronunciation_score', None), "", 0, 100,
                           [(0, 50, 'red'), (50, 70, 'orange'), (70, 100, 'green')])
         st.markdown(html, unsafe_allow_html=True)
 
     # Second row: Fluency, Prosody, Waveform (spanning two columns)
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
-        html = html_gauge("Fluency", metrics.get('fluency_score', np.nan), "", 0, 100,
+        html = html_gauge("Fluency", metrics.get('fluency_score', None), "", 0, 100,
                           [(0, 50, 'red'), (50, 70, 'orange'), (70, 100, 'green')])
         st.markdown(html, unsafe_allow_html=True)
     with col2:
-        html = html_gauge("Prosody", metrics.get('prosody_score', np.nan), "", 0, 100,
+        html = html_gauge("Prosody", metrics.get('prosody_score', None), "", 0, 100,
                           [(0, 50, 'red'), (50, 70, 'orange'), (70, 100, 'green')])
         st.markdown(html, unsafe_allow_html=True)
     with col3:
@@ -670,6 +677,8 @@ if audio_bytes and s:
         st.warning("Clipping detected (possible distortions)")
     if 'pronunciation_error' in metrics:
         st.warning(f"Pronunciation assessment error: {metrics['pronunciation_error']}")
+    elif metrics.get('pronunciation_score') is None and speech_key:
+        st.info("Pronunciation assessment not available for this language or no scores returned.")
 
 # Download Project button at the bottom
 if st.session_state.scripts:
