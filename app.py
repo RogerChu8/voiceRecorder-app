@@ -107,7 +107,7 @@ def compute_audio_metrics(audio_bytes, script_text="", speech_key=None, service_
 
             speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=service_region)
             audio_config = speechsdk.AudioConfig(filename=temp_filename)
-            speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, language="en-SG",
+            speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, language="th-TH",
                                                            audio_config=audio_config)
 
             pronunciation_config = speechsdk.PronunciationAssessmentConfig(
